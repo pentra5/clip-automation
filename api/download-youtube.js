@@ -42,9 +42,9 @@ export default async function handler(req, res) {
 
     console.log('🔄 Calling RapidAPI YouTube Media Downloader...');
 
-    // Call RapidAPI YouTube Media Downloader
+    // Call RapidAPI - request both videos and audios
     const rapidResponse = await fetch(
-      `https://youtube-media-downloader.p.rapidapi.com/v2/video/details?videoId=${videoId}&urlAccess=normal&videos=true&audios=false&subtitles=false&related=false`,
+      `https://youtube-media-downloader.p.rapidapi.com/v2/video/details?videoId=${videoId}&urlAccess=normal&videos=true&audios=true&subtitles=false&related=false`,
       {
         method: 'GET',
         headers: {
@@ -62,48 +62,67 @@ export default async function handler(req, res) {
 
     const rapidData = await rapidResponse.json();
     console.log('✅ RapidAPI response received');
+    console.log('📊 Videos count:', rapidData.videos?.length || 0);
+    console.log('📊 Audios count:', rapidData.audios?.length || 0);
 
-    // Find a good quality video (360p, 480p, or 720p)
     let downloadUrl = null;
     let quality = null;
     let title = rapidData.title || 'Unknown';
     let author = rapidData.channel?.name || 'Unknown';
     let duration = rapidData.lengthSeconds || 0;
 
-    // Look for videos with both video and audio
-    if (rapidData.videos && Array.isArray(rapidData.videos)) {
-      // First try to find 360p or 480p for faster processing
+    // Look for videos - prioritize ones with audio, but accept any
+    if (rapidData.videos && Array.isArray(rapidData.videos) && rapidData.videos.length > 0) {
+      console.log('🔍 Available formats:', rapidData.videos.map(v => `${v.quality} (hasAudio: ${v.hasAudio})`).join(', '));
+
+      // Priority 1: Find video with audio (360p, 480p, 720p)
       for (const video of rapidData.videos) {
-        if (video.hasAudio && (video.quality === '360p' || video.quality === '480p')) {
+        if (video.hasAudio && (video.quality === '360p' || video.quality === '480p' || video.quality === '720p')) {
           downloadUrl = video.url;
           quality = video.quality;
+          console.log(`✅ Found video with audio: ${quality}`);
           break;
         }
       }
 
-      // If not found, try 720p
+      // Priority 2: Any video with audio
       if (!downloadUrl) {
-        for (const video of rapidData.videos) {
-          if (video.hasAudio && video.quality === '720p') {
-            downloadUrl = video.url;
-            quality = video.quality;
-            break;
-          }
-        }
-      }
-
-      // If still not found, take any video with audio
-      if (!downloadUrl) {
-        const videoWithAudio = rapidData.videos.find(v => v.hasAudio);
+        const videoWithAudio = rapidData.videos.find(v => v.hasAudio && v.url);
         if (videoWithAudio) {
           downloadUrl = videoWithAudio.url;
           quality = videoWithAudio.quality || 'unknown';
+          console.log(`✅ Found any video with audio: ${quality}`);
+        }
+      }
+
+      // Priority 3: Video without audio (better than nothing for testing)
+      if (!downloadUrl) {
+        // Try to get 360p or 480p first
+        for (const video of rapidData.videos) {
+          if (video.url && (video.quality === '360p' || video.quality === '480p')) {
+            downloadUrl = video.url;
+            quality = video.quality + ' (no audio)';
+            console.log(`⚠️ Using video without audio: ${quality}`);
+            break;
+          }
+        }
+
+        // Take any video
+        if (!downloadUrl) {
+          const anyVideo = rapidData.videos.find(v => v.url);
+          if (anyVideo) {
+            downloadUrl = anyVideo.url;
+            quality = (anyVideo.quality || 'unknown') + ' (no audio)';
+            console.log(`⚠️ Using any video: ${quality}`);
+          }
         }
       }
     }
 
     if (!downloadUrl) {
       console.log('❌ No suitable video format found');
+      console.log('📋 Full response:', JSON.stringify(rapidData, null, 2).substring(0, 500));
+
       return res.status(200).json({
         success: false,
         videoUrl: youtubeUrl,
