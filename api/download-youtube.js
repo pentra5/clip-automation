@@ -1,8 +1,8 @@
-import ytdl from 'ytdl-core';
+import ytdl from '@distube/ytdl-core';
 import { put } from '@vercel/blob';
 
 export const config = {
-  maxDuration: 300, // 5 minutes timeout
+  maxDuration: 60,
 };
 
 export default async function handler(req, res) {
@@ -33,18 +33,28 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Invalid YouTube URL' });
     }
 
-    // Get video info
-    const info = await ytdl.getInfo(url);
+    // Get video info with agent to avoid bot detection
+    const info = await ytdl.getInfo(url, {
+      requestOptions: {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        }
+      }
+    });
+
     const title = info.videoDetails.title;
     const duration = parseInt(info.videoDetails.lengthSeconds);
     const videoId = info.videoDetails.videoId;
 
     console.log(`📹 Video: ${title} (${duration}s)`);
 
-    // Get best format (video + audio combined)
-    const format = ytdl.chooseFormat(info.formats, { 
-      quality: 'highest',
-      filter: 'videoandaudio' 
+    // Get format - prefer smaller quality for faster processing
+    const format = ytdl.chooseFormat(info.formats, {
+      quality: '18', // 360p mp4 - faster download
+      filter: 'videoandaudio'
+    }) || ytdl.chooseFormat(info.formats, {
+      quality: 'lowest',
+      filter: 'videoandaudio'
     });
 
     if (!format) {
@@ -53,19 +63,26 @@ export default async function handler(req, res) {
 
     // Download video as buffer
     const chunks = [];
-    const videoStream = ytdl(url, { format });
-    
+    const videoStream = ytdl(url, {
+      format,
+      requestOptions: {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        }
+      }
+    });
+
     for await (const chunk of videoStream) {
       chunks.push(chunk);
     }
-    
+
     const videoBuffer = Buffer.concat(chunks);
     console.log(`✅ Downloaded: ${(videoBuffer.length / 1024 / 1024).toFixed(2)} MB`);
 
     // Upload to Vercel Blob Storage
     const safeTitle = title.replace(/[^a-z0-9]/gi, '_').substring(0, 50);
     const fileName = `${Date.now()}_${safeTitle}.mp4`;
-    
+
     const blob = await put(fileName, videoBuffer, {
       access: 'public',
       addRandomSuffix: true,
@@ -84,9 +101,9 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error('❌ Download error:', error);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: error.message,
-      details: 'Failed to download YouTube video'
+      details: 'Failed to download YouTube video. YouTube may be blocking this request.'
     });
   }
 }
