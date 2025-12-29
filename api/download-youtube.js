@@ -60,13 +60,20 @@ export default async function handler(req, res) {
       }
     );
 
+    console.log('📡 RapidAPI status:', rapidResponse.status);
+
     if (!rapidResponse.ok) {
-      throw new Error(`RapidAPI returned ${rapidResponse.status}`);
+      const errorText = await rapidResponse.text();
+      console.log('❌ RapidAPI error body:', errorText);
+      throw new Error(`RapidAPI returned ${rapidResponse.status}: ${errorText}`);
     }
 
     const rapidData = await rapidResponse.json();
     console.log('✅ RapidAPI response received');
-    console.log('📊 Videos:', rapidData.videos?.length || 0, '| Audios:', rapidData.audios?.length || 0);
+    console.log('📋 Response keys:', Object.keys(rapidData).join(', '));
+    console.log('📋 Error/Status:', rapidData.error || rapidData.status || 'none');
+    console.log('📊 Videos type:', typeof rapidData.videos, '| Audios type:', typeof rapidData.audios);
+
 
     let title = rapidData.title || 'Unknown';
     let author = rapidData.channel?.name || 'Unknown';
