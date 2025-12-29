@@ -1,4 +1,8 @@
 import { put } from '@vercel/blob';
+import { execSync, spawn } from 'child_process';
+import { writeFileSync, unlinkSync, readFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 export const config = {
   maxDuration: 60,
@@ -26,6 +30,8 @@ export default async function handler(req, res) {
   if (!url) {
     return res.status(400).json({ error: 'URL is required' });
   }
+
+  const tempFiles = [];
 
   try {
     console.log('📥 Processing YouTube URL:', url);
@@ -55,112 +61,142 @@ export default async function handler(req, res) {
     );
 
     if (!rapidResponse.ok) {
-      const errorText = await rapidResponse.text();
-      console.log('❌ RapidAPI error:', rapidResponse.status, errorText);
       throw new Error(`RapidAPI returned ${rapidResponse.status}`);
     }
 
     const rapidData = await rapidResponse.json();
     console.log('✅ RapidAPI response received');
-    console.log('📊 Videos count:', rapidData.videos?.length || 0);
-    console.log('📊 Audios count:', rapidData.audios?.length || 0);
+    console.log('📊 Videos:', rapidData.videos?.length || 0, '| Audios:', rapidData.audios?.length || 0);
 
-    let downloadUrl = null;
-    let quality = null;
     let title = rapidData.title || 'Unknown';
     let author = rapidData.channel?.name || 'Unknown';
     let duration = rapidData.lengthSeconds || 0;
 
-    // Look for videos - prioritize ones with audio, but accept any
-    if (rapidData.videos && Array.isArray(rapidData.videos) && rapidData.videos.length > 0) {
-      console.log('🔍 Available formats:', rapidData.videos.map(v => `${v.quality} (hasAudio: ${v.hasAudio})`).join(', '));
+    // First, try to find a video WITH audio (progressive stream)
+    let videoWithAudio = null;
+    if (rapidData.videos) {
+      videoWithAudio = rapidData.videos.find(v => v.hasAudio && v.url &&
+        (v.quality === '360p' || v.quality === '480p' || v.quality === '720p'));
 
-      // Priority 1: Find video with audio (360p, 480p, 720p)
-      for (const video of rapidData.videos) {
-        if (video.hasAudio && (video.quality === '360p' || video.quality === '480p' || video.quality === '720p')) {
-          downloadUrl = video.url;
-          quality = video.quality;
-          console.log(`✅ Found video with audio: ${quality}`);
-          break;
-        }
-      }
-
-      // Priority 2: Any video with audio
-      if (!downloadUrl) {
-        const videoWithAudio = rapidData.videos.find(v => v.hasAudio && v.url);
-        if (videoWithAudio) {
-          downloadUrl = videoWithAudio.url;
-          quality = videoWithAudio.quality || 'unknown';
-          console.log(`✅ Found any video with audio: ${quality}`);
-        }
-      }
-
-      // Priority 3: Video without audio (better than nothing for testing)
-      if (!downloadUrl) {
-        // Try to get 360p or 480p first
-        for (const video of rapidData.videos) {
-          if (video.url && (video.quality === '360p' || video.quality === '480p')) {
-            downloadUrl = video.url;
-            quality = video.quality + ' (no audio)';
-            console.log(`⚠️ Using video without audio: ${quality}`);
-            break;
-          }
-        }
-
-        // Take any video
-        if (!downloadUrl) {
-          const anyVideo = rapidData.videos.find(v => v.url);
-          if (anyVideo) {
-            downloadUrl = anyVideo.url;
-            quality = (anyVideo.quality || 'unknown') + ' (no audio)';
-            console.log(`⚠️ Using any video: ${quality}`);
-          }
-        }
+      if (!videoWithAudio) {
+        videoWithAudio = rapidData.videos.find(v => v.hasAudio && v.url);
       }
     }
 
-    if (!downloadUrl) {
-      console.log('❌ No suitable video format found');
-      console.log('📋 Full response:', JSON.stringify(rapidData, null, 2).substring(0, 500));
+    if (videoWithAudio) {
+      // Found progressive stream with audio - use it directly
+      console.log(`✅ Found progressive stream: ${videoWithAudio.quality}`);
 
+      const videoResponse = await fetch(videoWithAudio.url);
+      const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
+      console.log(`📁 Downloaded: ${(videoBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+
+      const safeTitle = title.replace(/[^a-z0-9]/gi, '_').substring(0, 30);
+      const fileName = `${Date.now()}_${safeTitle}.mp4`;
+
+      const blob = await put(fileName, videoBuffer, {
+        access: 'public',
+        addRandomSuffix: true,
+      });
+
+      console.log('☁️ Uploaded to:', blob.url);
+
+      return res.status(200).json({
+        success: true,
+        videoUrl: blob.url,
+        youtubeUrl: youtubeUrl,
+        videoId: videoId,
+        title: title,
+        author: author,
+        duration: duration,
+        quality: videoWithAudio.quality,
+        source: 'rapidapi'
+      });
+    }
+
+    // No progressive stream - need to merge video + audio
+    console.log('⚠️ No progressive stream, merging video + audio...');
+
+    // Find best video stream (no audio)
+    let videoStream = null;
+    if (rapidData.videos) {
+      videoStream = rapidData.videos.find(v => !v.hasAudio && v.url &&
+        (v.quality === '360p' || v.quality === '480p'));
+      if (!videoStream) {
+        videoStream = rapidData.videos.find(v => v.url);
+      }
+    }
+
+    // Find best audio stream
+    let audioStream = null;
+    if (rapidData.audios) {
+      audioStream = rapidData.audios.find(a => a.url);
+    }
+
+    if (!videoStream || !audioStream) {
+      console.log('❌ Could not find video or audio stream');
       return res.status(200).json({
         success: false,
         videoUrl: youtubeUrl,
         youtubeUrl: youtubeUrl,
         videoId: videoId,
         title: title,
-        author: author,
         source: 'youtube-direct',
-        error: 'No downloadable format found'
+        error: 'No suitable streams found'
       });
     }
 
-    console.log(`📥 Downloading video (${quality})...`);
+    console.log(`📥 Downloading video (${videoStream.quality || 'unknown'})...`);
+    const videoResponse = await fetch(videoStream.url);
+    const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
+    console.log(`📁 Video: ${(videoBuffer.length / 1024 / 1024).toFixed(2)} MB`);
 
-    // Download the video
-    const videoResponse = await fetch(downloadUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
+    console.log('📥 Downloading audio...');
+    const audioResponse = await fetch(audioStream.url);
+    const audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
+    console.log(`📁 Audio: ${(audioBuffer.length / 1024 / 1024).toFixed(2)} MB`);
 
-    if (!videoResponse.ok) {
-      throw new Error(`Failed to download video: ${videoResponse.status}`);
+    // Save to temp files
+    const videoPath = join(tmpdir(), `video_${Date.now()}.mp4`);
+    const audioPath = join(tmpdir(), `audio_${Date.now()}.m4a`);
+    const outputPath = join(tmpdir(), `merged_${Date.now()}.mp4`);
+
+    tempFiles.push(videoPath, audioPath, outputPath);
+
+    writeFileSync(videoPath, videoBuffer);
+    writeFileSync(audioPath, audioBuffer);
+
+    console.log('🔧 Merging video + audio with FFmpeg...');
+
+    // Merge with FFmpeg - use -shortest to match lengths
+    try {
+      execSync(`ffmpeg -i ${videoPath} -i ${audioPath} -c:v copy -c:a aac -shortest ${outputPath}`, {
+        timeout: 50000  // 50 second timeout
+      });
+    } catch (ffmpegError) {
+      console.log('⚠️ FFmpeg merge failed:', ffmpegError.message);
+      // Fallback: just use video without audio
+      writeFileSync(outputPath, videoBuffer);
     }
 
-    const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
-    console.log(`📁 Downloaded: ${(videoBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+    const mergedBuffer = readFileSync(outputPath);
+    console.log(`📁 Merged: ${(mergedBuffer.length / 1024 / 1024).toFixed(2)} MB`);
 
     // Upload to Vercel Blob
     const safeTitle = title.replace(/[^a-z0-9]/gi, '_').substring(0, 30);
     const fileName = `${Date.now()}_${safeTitle}.mp4`;
 
-    const blob = await put(fileName, videoBuffer, {
+    const blob = await put(fileName, mergedBuffer, {
       access: 'public',
       addRandomSuffix: true,
     });
 
     console.log('☁️ Uploaded to:', blob.url);
+
+    // Cleanup temp files
+    for (const file of tempFiles) {
+      try { unlinkSync(file); } catch (e) { }
+    }
 
     return res.status(200).json({
       success: true,
@@ -170,12 +206,17 @@ export default async function handler(req, res) {
       title: title,
       author: author,
       duration: duration,
-      quality: quality,
+      quality: (videoStream.quality || 'unknown') + ' (merged)',
       source: 'rapidapi'
     });
 
   } catch (error) {
     console.error('❌ Error:', error);
+
+    // Cleanup temp files
+    for (const file of tempFiles) {
+      try { unlinkSync(file); } catch (e) { }
+    }
 
     // Fallback: return YouTube URL
     const videoIdMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/);
