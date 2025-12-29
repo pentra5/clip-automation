@@ -72,14 +72,20 @@ export default async function handler(req, res) {
     let author = rapidData.channel?.name || 'Unknown';
     let duration = rapidData.lengthSeconds || 0;
 
+    // Ensure videos and audios are arrays
+    const videos = Array.isArray(rapidData.videos) ? rapidData.videos : [];
+    const audios = Array.isArray(rapidData.audios) ? rapidData.audios : [];
+
+    console.log('📊 Videos:', videos.length, '| Audios:', audios.length);
+
     // First, try to find a video WITH audio (progressive stream)
     let videoWithAudio = null;
-    if (rapidData.videos) {
-      videoWithAudio = rapidData.videos.find(v => v.hasAudio && v.url &&
+    if (videos.length > 0) {
+      videoWithAudio = videos.find(v => v.hasAudio && v.url &&
         (v.quality === '360p' || v.quality === '480p' || v.quality === '720p'));
 
       if (!videoWithAudio) {
-        videoWithAudio = rapidData.videos.find(v => v.hasAudio && v.url);
+        videoWithAudio = videos.find(v => v.hasAudio && v.url);
       }
     }
 
@@ -119,18 +125,18 @@ export default async function handler(req, res) {
 
     // Find best video stream (no audio)
     let videoStream = null;
-    if (rapidData.videos) {
-      videoStream = rapidData.videos.find(v => !v.hasAudio && v.url &&
+    if (videos.length > 0) {
+      videoStream = videos.find(v => !v.hasAudio && v.url &&
         (v.quality === '360p' || v.quality === '480p'));
       if (!videoStream) {
-        videoStream = rapidData.videos.find(v => v.url);
+        videoStream = videos.find(v => v.url);
       }
     }
 
     // Find best audio stream
     let audioStream = null;
-    if (rapidData.audios) {
-      audioStream = rapidData.audios.find(a => a.url);
+    if (audios.length > 0) {
+      audioStream = audios.find(a => a.url);
     }
 
     if (!videoStream || !audioStream) {
