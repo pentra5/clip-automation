@@ -4,9 +4,8 @@ export const config = {
   maxDuration: 60,
 };
 
-// RapidAPI YouTube Downloader - FREE: 20 requests/day
-// Get your API key from: https://rapidapi.com/ytjar/api/youtube-video-download-info
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || '';
+// RapidAPI YouTube Media Downloader
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || '32fb7fcd39mshc9d70e0c11d85f4p110d9fjsn719485e42656';
 
 export default async function handler(req, res) {
   // Enable CORS
@@ -41,196 +40,136 @@ export default async function handler(req, res) {
     const videoId = videoIdMatch[1];
     const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-    // Method 1: Try RapidAPI if key is configured
-    if (RAPIDAPI_KEY) {
-      console.log('🔄 Trying RapidAPI...');
-      try {
-        const rapidResponse = await fetch(`https://youtube-video-download-info.p.rapidapi.com/dl?id=${videoId}`, {
-          method: 'GET',
-          headers: {
-            'X-RapidAPI-Key': RAPIDAPI_KEY,
-            'X-RapidAPI-Host': 'youtube-video-download-info.p.rapidapi.com'
-          }
-        });
+    console.log('🔄 Calling RapidAPI YouTube Media Downloader...');
 
-        if (rapidResponse.ok) {
-          const rapidData = await rapidResponse.json();
-
-          // Find 360p or 480p format (smaller for faster processing)
-          const formats = rapidData.link || {};
-          let downloadUrl = null;
-          let quality = null;
-
-          // Try to find a good quality
-          for (const [q, links] of Object.entries(formats)) {
-            if (q.includes('360') || q.includes('480') || q.includes('720')) {
-              if (Array.isArray(links) && links.length > 0) {
-                downloadUrl = links[0];
-                quality = q;
-                break;
-              }
-            }
-          }
-
-          if (downloadUrl) {
-            console.log(`✅ RapidAPI success! Quality: ${quality}`);
-
-            // Download the video
-            const videoResponse = await fetch(downloadUrl);
-            const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
-            console.log(`📁 Downloaded: ${(videoBuffer.length / 1024 / 1024).toFixed(2)} MB`);
-
-            // Upload to Vercel Blob
-            const fileName = `${Date.now()}_${videoId}.mp4`;
-            const blob = await put(fileName, videoBuffer, {
-              access: 'public',
-              addRandomSuffix: true,
-            });
-
-            console.log('☁️ Uploaded to:', blob.url);
-
-            return res.status(200).json({
-              success: true,
-              videoUrl: blob.url,
-              youtubeUrl: youtubeUrl,
-              videoId: videoId,
-              title: rapidData.title || 'Unknown',
-              author: rapidData.author || 'Unknown',
-              duration: rapidData.duration,
-              source: 'rapidapi'
-            });
-          }
-        }
-      } catch (rapidError) {
-        console.log('⚠️ RapidAPI failed:', rapidError.message);
-      }
-    }
-
-    // Method 2: Try savetube API (free, no key needed)
-    console.log('🔄 Trying SaveTube API...');
-    try {
-      const savetubeResponse = await fetch('https://api.savetube.me/info?url=' + encodeURIComponent(youtubeUrl), {
+    // Call RapidAPI YouTube Media Downloader
+    const rapidResponse = await fetch(
+      `https://youtube-media-downloader.p.rapidapi.com/v2/video/details?videoId=${videoId}&urlAccess=normal&videos=true&audios=false&subtitles=false&related=false`,
+      {
+        method: 'GET',
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          'X-RapidAPI-Key': RAPIDAPI_KEY,
+          'X-RapidAPI-Host': 'youtube-media-downloader.p.rapidapi.com'
         }
-      });
+      }
+    );
 
-      if (savetubeResponse.ok) {
-        const savetubeData = await savetubeResponse.json();
+    if (!rapidResponse.ok) {
+      const errorText = await rapidResponse.text();
+      console.log('❌ RapidAPI error:', rapidResponse.status, errorText);
+      throw new Error(`RapidAPI returned ${rapidResponse.status}`);
+    }
 
-        if (savetubeData.data && savetubeData.data.video_formats) {
-          // Find 360p or 480p
-          const format = savetubeData.data.video_formats.find(f =>
-            f.quality === '360p' || f.quality === '480p' || f.quality === '720p'
-          );
+    const rapidData = await rapidResponse.json();
+    console.log('✅ RapidAPI response received');
 
-          if (format && format.url) {
-            console.log(`✅ SaveTube success! Quality: ${format.quality}`);
+    // Find a good quality video (360p, 480p, or 720p)
+    let downloadUrl = null;
+    let quality = null;
+    let title = rapidData.title || 'Unknown';
+    let author = rapidData.channel?.name || 'Unknown';
+    let duration = rapidData.lengthSeconds || 0;
 
-            const videoResponse = await fetch(format.url);
-            const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
-            console.log(`📁 Downloaded: ${(videoBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+    // Look for videos with both video and audio
+    if (rapidData.videos && Array.isArray(rapidData.videos)) {
+      // First try to find 360p or 480p for faster processing
+      for (const video of rapidData.videos) {
+        if (video.hasAudio && (video.quality === '360p' || video.quality === '480p')) {
+          downloadUrl = video.url;
+          quality = video.quality;
+          break;
+        }
+      }
 
-            const fileName = `${Date.now()}_${videoId}.mp4`;
-            const blob = await put(fileName, videoBuffer, {
-              access: 'public',
-              addRandomSuffix: true,
-            });
-
-            return res.status(200).json({
-              success: true,
-              videoUrl: blob.url,
-              youtubeUrl: youtubeUrl,
-              videoId: videoId,
-              title: savetubeData.data.title || 'Unknown',
-              author: savetubeData.data.author || 'Unknown',
-              source: 'savetube'
-            });
+      // If not found, try 720p
+      if (!downloadUrl) {
+        for (const video of rapidData.videos) {
+          if (video.hasAudio && video.quality === '720p') {
+            downloadUrl = video.url;
+            quality = video.quality;
+            break;
           }
         }
       }
-    } catch (savetubeError) {
-      console.log('⚠️ SaveTube failed:', savetubeError.message);
+
+      // If still not found, take any video with audio
+      if (!downloadUrl) {
+        const videoWithAudio = rapidData.videos.find(v => v.hasAudio);
+        if (videoWithAudio) {
+          downloadUrl = videoWithAudio.url;
+          quality = videoWithAudio.quality || 'unknown';
+        }
+      }
     }
 
-    // Method 3: Try y2mate clone API
-    console.log('🔄 Trying Y2Mate API...');
-    try {
-      const y2Response = await fetch(`https://api.vevioz.com/api/button/mp4/${videoId}`, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
+    if (!downloadUrl) {
+      console.log('❌ No suitable video format found');
+      return res.status(200).json({
+        success: false,
+        videoUrl: youtubeUrl,
+        youtubeUrl: youtubeUrl,
+        videoId: videoId,
+        title: title,
+        author: author,
+        source: 'youtube-direct',
+        error: 'No downloadable format found'
       });
-
-      if (y2Response.ok) {
-        const html = await y2Response.text();
-        // Extract download URL from response
-        const urlMatch = html.match(/href="(https:\/\/[^"]+\.mp4[^"]*)"/);
-
-        if (urlMatch && urlMatch[1]) {
-          console.log('✅ Y2Mate success!');
-
-          const videoResponse = await fetch(urlMatch[1]);
-          const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
-          console.log(`📁 Downloaded: ${(videoBuffer.length / 1024 / 1024).toFixed(2)} MB`);
-
-          const fileName = `${Date.now()}_${videoId}.mp4`;
-          const blob = await put(fileName, videoBuffer, {
-            access: 'public',
-            addRandomSuffix: true,
-          });
-
-          // Get title from oEmbed
-          let title = 'Unknown';
-          try {
-            const infoRes = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(youtubeUrl)}&format=json`);
-            if (infoRes.ok) {
-              const info = await infoRes.json();
-              title = info.title;
-            }
-          } catch (e) { }
-
-          return res.status(200).json({
-            success: true,
-            videoUrl: blob.url,
-            youtubeUrl: youtubeUrl,
-            videoId: videoId,
-            title: title,
-            source: 'y2mate'
-          });
-        }
-      }
-    } catch (y2Error) {
-      console.log('⚠️ Y2Mate failed:', y2Error.message);
     }
 
-    // All methods failed - return YouTube URL for Gemini only
-    console.log('⚠️ All download methods failed');
+    console.log(`📥 Downloading video (${quality})...`);
 
-    let title = 'Unknown';
-    try {
-      const infoRes = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(youtubeUrl)}&format=json`);
-      if (infoRes.ok) {
-        const info = await infoRes.json();
-        title = info.title;
+    // Download the video
+    const videoResponse = await fetch(downloadUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       }
-    } catch (e) { }
+    });
+
+    if (!videoResponse.ok) {
+      throw new Error(`Failed to download video: ${videoResponse.status}`);
+    }
+
+    const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
+    console.log(`📁 Downloaded: ${(videoBuffer.length / 1024 / 1024).toFixed(2)} MB`);
+
+    // Upload to Vercel Blob
+    const safeTitle = title.replace(/[^a-z0-9]/gi, '_').substring(0, 30);
+    const fileName = `${Date.now()}_${safeTitle}.mp4`;
+
+    const blob = await put(fileName, videoBuffer, {
+      access: 'public',
+      addRandomSuffix: true,
+    });
+
+    console.log('☁️ Uploaded to:', blob.url);
+
+    return res.status(200).json({
+      success: true,
+      videoUrl: blob.url,
+      youtubeUrl: youtubeUrl,
+      videoId: videoId,
+      title: title,
+      author: author,
+      duration: duration,
+      quality: quality,
+      source: 'rapidapi'
+    });
+
+  } catch (error) {
+    console.error('❌ Error:', error);
+
+    // Fallback: return YouTube URL
+    const videoIdMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/);
+    const videoId = videoIdMatch ? videoIdMatch[1] : 'unknown';
+    const youtubeUrl = videoId !== 'unknown' ? `https://www.youtube.com/watch?v=${videoId}` : url;
 
     return res.status(200).json({
       success: false,
       videoUrl: youtubeUrl,
       youtubeUrl: youtubeUrl,
       videoId: videoId,
-      title: title,
       source: 'youtube-direct',
-      error: 'All download services failed. Consider adding RAPIDAPI_KEY for reliable downloads.'
-    });
-
-  } catch (error) {
-    console.error('❌ Error:', error);
-    return res.status(500).json({
-      error: error.message,
-      details: 'Failed to process YouTube URL'
+      error: error.message
     });
   }
 }
